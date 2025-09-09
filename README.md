@@ -58,6 +58,51 @@ podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
   file bin/masscan
 '
 ```
+### Embedded ARM (musl static) builds
+
+Cross‑compile fully static musl binaries for ARM boards (routers/SBCs) using either Zig or GCC cross toolchains. Both approaches link libpcap.a and define -DSTATICPCAP.
+
+A) Zig toolchain (recommended for simplicity)
+aarch64 (ARM64)
+```bash
+podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
+  set -eux
+
+  apk add --no-cache build-base linux-headers git pkgconf curl \
+                         autoconf automake libtool flex bison zig upx file
+
+  # Sanity: zig + target probe + tiny test link for aarch64-musl
+  zig version
+  (zig targets | grep -E "aarch64-linux-musl" || true)
+  printf "int main(){}" > t.c
+  zig cc -target aarch64-linux-musl -static t.c -o /tmp/t
+  file /tmp/t   # should say: ELF 64-bit LSB executable, aarch64, statically linked
+
+  # 1) Build libpcap (static) for aarch64-musl into /opt/aarch64
+  curl -L https://www.tcpdump.org/release/libpcap-1.10.5.tar.gz | tar xz
+  cd libpcap-1.10.5
+  CC="zig cc -target aarch64-linux-musl" AR="zig ar" RANLIB="zig ranlib" \
+  CFLAGS="-Os -ffunction-sections -fdata-sections" \
+  ./configure --host=aarch64-linux-musl --disable-shared --prefix=/opt/aarch64
+  make -j"$(nproc)" && make install
+  cd ..
+
+  # 2) Build masscan (fully static) linked to that libpcap.a
+  git clone --depth=1 https://github.com/robertdavidgraham/masscan
+  cd masscan && make clean || true
+  CC="zig cc -target aarch64-linux-musl" \
+  CFLAGS="-Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -DSTATICPCAP" \
+  LDFLAGS="-static -Wl,--gc-sections" \
+  LIBS="/opt/aarch64/lib/libpcap.a" \
+  make -j"$(nproc)"
+
+  strip -s bin/masscan
+  upx --best --lzma bin/masscan || true
+  file bin/masscan && ls -lh bin/masscan
+'
+```
+
+
 
 **Output path:** `./masscan/bin/masscan`
 
