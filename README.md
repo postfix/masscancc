@@ -60,10 +60,11 @@ podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
 ```
 ### Embedded ARM (musl static) builds
 
-Cross‑compile fully static musl binaries for ARM boards (routers/SBCs) using either Zig or GCC cross toolchains. Both approaches link libpcap.a and define -DSTATICPCAP.
+Cross‑compile fully static musl binaries for ARM boards (routers/SBCs) using Zig (recommended for simplicity)
+aarch64 (ARM64) , it links libpcap.a and define -DSTATICPCAP.
 
-A) Zig toolchain (recommended for simplicity)
-aarch64 (ARM64)
+#### Zig toolchain 
+
 ```bash
 podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
   set -eux
@@ -101,8 +102,43 @@ podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
   file bin/masscan && ls -lh bin/masscan
 '
 ```
+#### armv7 (ARM32 hard-float, NEON, musl, fully static)
+```bash
+podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
+  set -eux
+  apk add --no-cache build-base linux-headers git pkgconf curl \
+                         autoconf automake libtool flex bison zig upx file
 
+  # Sanity: make sure zig has the target; prove it can link static for armv7
+  zig version
+  (zig targets | grep -E "arm-linux-musleabihf" || true)
+  printf "int main(){}" > t.c
+  zig cc -target arm-linux-musleabihf -static t.c -o /tmp/t
+  file /tmp/t   # expect: ELF 32-bit LSB executable, ARM, EABI5, statically linked
 
+  # 1) libpcap (static archive) for armv7 hard-float into /opt/armv7
+  curl -L https://www.tcpdump.org/release/libpcap-1.10.5.tar.gz | tar xz
+  cd libpcap-1.10.5
+  CC="zig cc -target arm-linux-musleabihf" AR="zig ar" RANLIB="zig ranlib" \
+  CFLAGS="-Os -ffunction-sections -fdata-sections -march=armv7-a -mfpu=neon -mfloat-abi=hard" \
+  ./configure --host=arm-linux-musleabihf --disable-shared --prefix=/opt/armv7
+  make -j"$(nproc)" && make install
+  cd ..
+
+  # 2) masscan (fully static) linked against that libpcap.a
+  git clone --depth=1 https://github.com/robertdavidgraham/masscan
+  cd masscan && make clean || true
+  CC="zig cc -target arm-linux-musleabihf" \
+  CFLAGS="-Os -ffunction-sections -fdata-sections -march=armv7-a -mfpu=neon -mfloat-abi=hard -fno-unwind-tables -fno-asynchronous-unwind-tables -DSTATICPCAP" \
+  LDFLAGS="-static -Wl,--gc-sections" \
+  LIBS="/opt/armv7/lib/libpcap.a" \
+  make -j"$(nproc)"
+
+  strip -s bin/masscan
+  upx --best --lzma bin/masscan || true
+  file bin/masscan && ls -lh bin/masscan
+'
+```
 
 **Output path:** `./masscan/bin/masscan`
 
@@ -116,16 +152,8 @@ podman run --rm -it -v "$PWD":/w -w /w alpine:3.20 sh -lc '
 
 ---
 
-## Verify the binary
 
-```bash
-ls -lh masscan/bin/masscan
-./masscan/bin/masscan --version
-file masscan/bin/masscan         # should say: statically linked
-ldd masscan/bin/masscan || true  # should say: not a dynamic executable
-```
-
-Run as non‑root (optional, Linux):
+#### Run as non‑root (optional, Linux):
 
 ```bash
 sudo install -m755 masscan/bin/masscan /usr/local/bin/masscan
